@@ -4,7 +4,7 @@
 
 ## 项目身份
 
-- 名称：论文数据检测与修复工具（稳查查）
+- 名称：论文数据检测与修复工具（文查查）
 - 仓库：https://github.com/AsanBrother/wenchacha-data-tool
 - 技术栈：React + TypeScript + Vite + TailwindCSS + Zustand
 - 架构：纯前端，所有数据处理在浏览器完成，保护隐私
