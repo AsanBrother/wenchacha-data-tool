@@ -1,15 +1,31 @@
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '../lib/utils';
+import { CheckCircle2, Circle } from 'lucide-react';
 
 interface DataTableProps {
   data: number[];
   suspiciousIndices?: number[];
   className?: string;
   pageSize?: number;
+  selectable?: boolean;
+  selectedIndices?: Set<number>;
+  onToggleIndex?: (index: number) => void;
+  highlightIndices?: Set<number>;
+  highlightClass?: string;
 }
 
-export default function DataTable({ data, suspiciousIndices, className, pageSize = 20 }: DataTableProps) {
+export default function DataTable({
+  data,
+  suspiciousIndices,
+  className,
+  pageSize = 20,
+  selectable = false,
+  selectedIndices,
+  onToggleIndex,
+  highlightIndices,
+  highlightClass = 'bg-yellow-50',
+}: DataTableProps) {
   const { t } = useTranslation();
   const [currentPage, setCurrentPage] = useState(1);
 
@@ -31,6 +47,11 @@ export default function DataTable({ data, suspiciousIndices, className, pageSize
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
+              {selectable && (
+                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-12">
+                  选择
+                </th>
+              )}
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 {t('detection.table.index')}
               </th>
@@ -48,18 +69,45 @@ export default function DataTable({ data, suspiciousIndices, className, pageSize
             {paginatedData.map((value, index) => {
               const globalIndex = startIndex + index;
               const isSuspicious = suspiciousSet.has(globalIndex);
+              const isSelected = selectedIndices?.has(globalIndex);
+              const isHighlighted = highlightIndices?.has(globalIndex);
+
               return (
                 <tr
                   key={globalIndex}
                   className={cn(
-                    'hover:bg-gray-50 transition-colors',
-                    isSuspicious && 'bg-red-50'
+                    'transition-colors',
+                    isHighlighted ? highlightClass : 'hover:bg-gray-50',
+                    isSuspicious && !isHighlighted && 'bg-red-50',
+                    selectable && 'cursor-pointer'
                   )}
+                  onClick={() => {
+                    if (selectable && onToggleIndex) {
+                      onToggleIndex(globalIndex);
+                    }
+                  }}
                 >
+                  {selectable && (
+                    <td className="px-3 py-3 whitespace-nowrap">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onToggleIndex?.(globalIndex);
+                        }}
+                        className="flex items-center justify-center"
+                      >
+                        {isSelected ? (
+                          <CheckCircle2 className="w-5 h-5 text-blue-600" />
+                        ) : (
+                          <Circle className="w-5 h-5 text-gray-300 hover:text-gray-400" />
+                        )}
+                      </button>
+                    </td>
+                  )}
                   <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
                     {globalIndex + 1}
                   </td>
-                  <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">
+                  <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900 font-mono">
                     {value}
                   </td>
                   {suspiciousSet.size > 0 && (

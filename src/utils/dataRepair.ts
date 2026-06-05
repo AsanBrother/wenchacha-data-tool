@@ -1,110 +1,279 @@
-/**
- * 数据修复模块
- *
- * 功能：将检测出的可疑数据替换为合理值，同时保持原有统计特征
- * 策略：
- *   1. 从正常数据中加权随机选取基准值
- *   2. 叠加正态分布噪声（标准差*10%），避免完全重复
- *   3. 保持原始数据的小数位数
- *   4. 若修复后均值偏移>1%标准差，做均值校正
- */
-
 import jStat from 'jstat';
 import { StatsData, calculateStats } from './dataGenerator';
 
-interface RepairResult {
+export interface RepairResult {
   repairedData: number[];
   statsBefore: StatsData;
   statsAfter: StatsData;
+  repairRecords: RepairRecord[];
 }
 
-function generateReplacementValue(
-  data: number[],
-  stats: StatsData,
-  decimalPlaces: number = 2
-): number {
-  const validData = [...data];
-  if (validData.length < 10) {
-    const value = jStat.normal.sample(stats.mean, stats.std);
+export interface RepairRecord {
+  index: number;
+  originalValue: number;
+  repairedValue: number;
+  reason: string;
+  method: string;
+}
+
+export interface RepairStrategy {
+  name: string;
+  description: string;
+  /** 生成替换值的核心函数 */
+  generate: (
+    data: number[],
+    stats: StatsData,
+    index: number,
+    decimalPlaces: number
+  ) => number;
+  /** 修正整体统计特征的后置处理 */
+  postProcess?: (
+    repairedData: number[],
+    indices: Set<number>,
+    targetStats: StatsData,
+    decimalPlaces: number
+  ) => number[];
+}
+
+/**
+ * 策略1：分布内插值（推荐）
+ * 基于四分位数位置，从数据本身的分布特征生成合理值
+ */
+const strategyDistribution: RepairStrategy = {
+  name: 'distribution',
+  description: '基于数据分布特征生成替换值',
+  generate: (data, stats, index, decimalPlaces) => {
+    const sorted = [...data].sort((a, b) => a - b);
+    const len = sorted.length;
+    
+    if (len < 20) {
+      return strategySample.generate(data, stats, index, decimalPlaces);
+    }
+    
+    const pos = Math.random();
+    let targetIdx: number;
+    if (pos < 0.1) {
+      targetIdx = Math.floor(len * (0.05 + Math.random() * 0.05));
+    } else if (pos < 0.25) {
+      targetIdx = Math.floor(len * (0.1 + Math.random() * 0.15));
+    } else if (pos < 0.75) {
+      targetIdx = Math.floor(len * (0.25 + Math.random() * 0.5));
+    } else if (pos < 0.9) {
+      targetIdx = Math.floor(len * (0.75 + Math.random() * 0.15));
+    } else {
+      targetIdx = Math.floor(len * (0.9 + Math.random() * 0.05));
+    }
+    
+    targetIdx = Math.max(0, Math.min(len - 1, targetIdx));
+    const baseValue = sorted[targetIdx];
+    const noise = jStat.normal.sample(0, stats.std * 0.08);
+    
+    const value = baseValue + noise;
     const factor = Math.pow(10, decimalPlaces);
     return Math.round(value * factor) / factor;
   }
+};
 
-  const weights = validData.map(() => 1 / validData.length);
-  const index = weightedRandomChoice(weights);
-  const baseValue = validData[index];
-
-  const noise = jStat.normal.sample(0, stats.std * 0.1);
-  const value = baseValue + noise;
-  const factor = Math.pow(10, decimalPlaces);
-  return Math.round(value * factor) / factor;
-}
-
-function weightedRandomChoice(weights: number[]): number {
-  const total = weights.reduce((a, b) => a + b, 0);
-  let random = Math.random() * total;
-  for (let i = 0; i < weights.length; i++) {
-    random -= weights[i];
-    if (random <= 0) return i;
+/**
+ * 策略2：正常数据采样
+ * 从非可疑数据中加权随机选取
+ */
+const strategySample: RepairStrategy = {
+  name: 'sample',
+  description: '从正常数据中采样替换',
+  generate: (data, stats, index, decimalPlaces) => {
+    const validData = [...data].filter(x => !Number.isNaN(x) && Number.isFinite(x));
+    if (validData.length < 5) {
+      const value = jStat.normal.sample(stats.mean, stats.std);
+      const factor = Math.pow(10, decimalPlaces);
+      return Math.round(Math.max(stats.min, Math.min(stats.max, value)) * factor) / factor;
+    }
+    
+    const weights = validData.map((v, i) => {
+      const distFromMean = Math.abs(v - stats.mean);
+      const distWeight = Math.max(0.1, 1 - (distFromMean / (stats.std * 3)));
+      const edgeBonus = (i === 0 || i === validData.length - 1) ? 0.8 : 1;
+      return distWeight * edgeBonus;
+    });
+    
+    const totalWeight = weights.reduce((a, b) => a + b, 0);
+    let random = Math.random() * totalWeight;
+    let selectedIdx = 0;
+    
+    for (let i = 0; i < weights.length; i++) {
+      random -= weights[i];
+      if (random <= 0) {
+        selectedIdx = i;
+        break;
+      }
+    }
+    
+    const baseValue = validData[selectedIdx];
+    const noise = jStat.normal.sample(0, stats.std * 0.05);
+    
+    const value = baseValue + noise;
+    const factor = Math.pow(10, decimalPlaces);
+    return Math.round(value * factor) / factor;
   }
-  return weights.length - 1;
-}
+};
+
+/**
+ * 策略3：统计重采样
+ * 保留整体统计特征的精细重采样
+ */
+const strategyStatistical: RepairStrategy = {
+  name: 'statistical',
+  description: '精细统计重采样，确保整体特征不变',
+  generate: (data, stats, index, decimalPlaces) => {
+    const sorted = [...data].sort((a, b) => a - b);
+    const len = sorted.length;
+    const p = Math.random();
+    
+    let sample: number;
+    if (p < 0.02) {
+      sample = jStat.uniform.sample(stats.min, stats.min + (stats.max - stats.min) * 0.1);
+    } else if (p < 0.15) {
+      const q1 = sorted[Math.floor(len * 0.25)];
+      sample = jStat.uniform.sample(stats.min, q1);
+    } else if (p < 0.85) {
+      const q1 = sorted[Math.floor(len * 0.25)];
+      const q3 = sorted[Math.floor(len * 0.75)];
+      sample = jStat.uniform.sample(q1, q3);
+    } else if (p < 0.98) {
+      const q3 = sorted[Math.floor(len * 0.75)];
+      sample = jStat.uniform.sample(q3, stats.max);
+    } else {
+      sample = jStat.uniform.sample(stats.max - (stats.max - stats.min) * 0.1, stats.max);
+    }
+    
+    const factor = Math.pow(10, decimalPlaces);
+    return Math.round(sample * factor) / factor;
+  },
+  postProcess: (repairedData, indices, targetStats, decimalPlaces) => {
+    const currentStats = calculateStats(repairedData);
+    const result = [...repairedData];
+    const factor = Math.pow(10, decimalPlaces);
+    
+    if (Math.abs(currentStats.mean - targetStats.mean) > targetStats.std * 0.02) {
+      const meanAdjustment = targetStats.mean - currentStats.mean;
+      const adjustAmount = meanAdjustment / (indices.size || 1);
+      
+      indices.forEach(idx => {
+        if (idx >= 0 && idx < result.length) {
+          result[idx] += adjustAmount;
+          result[idx] = Math.round(result[idx] * factor) / factor;
+        }
+      });
+    }
+    
+    return result;
+  }
+};
+
+const defaultStrategy = strategyStatistical;
 
 function detectDecimalPlaces(data: number[]): number {
   let maxPlaces = 0;
   data.forEach(num => {
-    const str = num.toString();
-    const decimalIndex = str.indexOf('.');
-    if (decimalIndex !== -1) {
-      maxPlaces = Math.max(maxPlaces, str.length - decimalIndex - 1);
+    if (Number.isFinite(num)) {
+      const str = num.toString();
+      const decimalIndex = str.indexOf('.');
+      if (decimalIndex !== -1) {
+        maxPlaces = Math.max(maxPlaces, str.length - decimalIndex - 1);
+      }
     }
   });
-  return Math.min(maxPlaces, 4);
+  return Math.min(maxPlaces, 6);
 }
 
-/**
- * 修复可疑数据
- *
- * @param data 原始数据数组
- * @param suspiciousIndices 可疑数据的索引数组（来自检测结果）
- * @param targetStats 目标统计特征（可选，默认使用原始数据的统计值）
- * @returns 修复结果：包含修复后数据、修复前后统计对比
- */
+function getReasonForIndex(index: number, data: number[], detectionResults: any[]): string {
+  const reasons: string[] = [];
+  
+  detectionResults.forEach(r => {
+    if (r.suspiciousIndices?.includes(index)) {
+      reasons.push(r.testName);
+    }
+  });
+  
+  if (reasons.length === 0) {
+    return 'user selected';
+  }
+  
+  return reasons.join(', ');
+}
+
 export function repairData(
   data: number[],
-  suspiciousIndices: number[],
-  targetStats?: StatsData
+  indicesToRepair: Set<number>,
+  detectionResults: any[],
+  strategy: RepairStrategy = defaultStrategy
 ): RepairResult {
   const statsBefore = calculateStats(data);
   const decimalPlaces = detectDecimalPlaces(data);
   const repairedData = [...data];
-
-  const toReplace = new Set(suspiciousIndices);
-
-  toReplace.forEach(idx => {
+  const repairRecords: RepairRecord[] = [];
+  
+  const indices = Array.from(indicesToRepair).sort((a, b) => a - b);
+  
+  indices.forEach(idx => {
     if (idx >= 0 && idx < data.length) {
-      repairedData[idx] = generateReplacementValue(
-        repairedData.filter((_, i) => !toReplace.has(i) || i === idx),
-        targetStats || statsBefore,
-        decimalPlaces
-      );
+      const originalValue = repairedData[idx];
+      const repairedValue = strategy.generate(repairedData, statsBefore, idx, decimalPlaces);
+      
+      repairedData[idx] = repairedValue;
+      
+      repairRecords.push({
+        index: idx,
+        originalValue,
+        repairedValue,
+        reason: getReasonForIndex(idx, data, detectionResults),
+        method: strategy.name
+      });
     }
   });
-
-  const currentStats = calculateStats(repairedData);
+  
+  let finalData = repairedData;
+  if (strategy.postProcess) {
+    finalData = strategy.postProcess(finalData, indicesToRepair, statsBefore, decimalPlaces);
+  }
+  
+  const currentStats = calculateStats(finalData);
   const meanDiff = statsBefore.mean - currentStats.mean;
-
-  if (Math.abs(meanDiff) > 0.01 * statsBefore.std) {
-    toReplace.forEach(idx => {
-      if (idx >= 0 && idx < repairedData.length) {
-        repairedData[idx] += meanDiff * 0.5;
-        const factor = Math.pow(10, decimalPlaces);
-        repairedData[idx] = Math.round(repairedData[idx] * factor) / factor;
+  const factor = Math.pow(10, decimalPlaces);
+  
+  if (Math.abs(meanDiff) > statsBefore.std * 0.01 && indices.length > 0) {
+    const adjustPerIndex = meanDiff / indices.length;
+    indices.forEach(idx => {
+      if (idx >= 0 && idx < finalData.length) {
+        finalData[idx] += adjustPerIndex;
+        finalData[idx] = Math.round(finalData[idx] * factor) / factor;
+        
+        const record = repairRecords.find(r => r.index === idx);
+        if (record) {
+          record.repairedValue = finalData[idx];
+        }
       }
     });
   }
+  
+  const statsAfter = calculateStats(finalData);
+  
+  return {
+    repairedData: finalData,
+    statsBefore,
+    statsAfter,
+    repairRecords
+  };
+}
 
-  const statsAfter = calculateStats(repairedData);
-
-  return { repairedData, statsBefore, statsAfter };
+export function repairDataAutomatically(
+  data: number[],
+  detectionResults: any[]
+): RepairResult {
+  const suspiciousIndices = new Set<number>();
+  detectionResults.forEach(r => {
+    r.suspiciousIndices?.forEach(i => suspiciousIndices.add(i));
+  });
+  
+  return repairData(data, suspiciousIndices, detectionResults, defaultStrategy);
 }

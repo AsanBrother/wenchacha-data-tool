@@ -22,6 +22,7 @@ export interface StatsData {
   min: number;
   max: number;
   count: number;
+  percentiles?: { p10: number; p25: number; p75: number; p90: number };
 }
 
 export interface GenerationConfig {
@@ -39,15 +40,25 @@ export interface GenerationConfig {
 
 /** 计算数据的基本统计量：均值、中位数、标准差、极值、计数 */
 export function calculateStats(data: number[]): StatsData {
-  const sorted = [...data].sort((a, b) => a - b);
-  const count = data.length;
-  const mean = jStat.mean(data);
-  const median = jStat.median(data);
-  const std = jStat.stdev(data, true);
-  const min = Math.min(...data);
-  const max = Math.max(...data);
+  const validData = data.filter(x => !Number.isNaN(x) && Number.isFinite(x));
+  const sorted = [...validData].sort((a, b) => a - b);
+  const count = validData.length;
+  const mean = jStat.mean(validData);
+  const median = jStat.median(validData);
+  const std = jStat.stdev(validData, true);
+  const min = Math.min(...validData);
+  const max = Math.max(...validData);
 
-  return { mean, median, std, min, max, count };
+  let percentiles: { p10: number; p25: number; p75: number; p90: number } | undefined;
+  if (count >= 10) {
+    const p10 = sorted[Math.floor(count * 0.1)];
+    const p25 = sorted[Math.floor(count * 0.25)];
+    const p75 = sorted[Math.floor(count * 0.75)];
+    const p90 = sorted[Math.floor(count * 0.9)];
+    percentiles = { p10, p25, p75, p90 };
+  }
+
+  return { mean, median, std, min, max, count, percentiles };
 }
 
 function generateNormal(mean: number, std: number, size: number): number[] {
